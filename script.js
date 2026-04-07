@@ -1,27 +1,38 @@
 // ==================== KONFIGURASI SUPABASE ====================
-// Menggunakan environment variables dari Netlify Supabase Extension
-// Extension otomatis menyediakan: SUPABASE_URL, SUPABASE_ANON_KEY [citation:1]
-
-// Inisialisasi Supabase
 const supabase = window.supabaseJs.createClient(
     process.env.SUPABASE_DATABASE_URL,
-    process.env.SUPABASE_ANON_KEY
+    process.env.SUPABASE_ANON_KEY,
+    {
+        auth: {
+            persistSession: false, // Nonaktifkan session untuk speed
+            autoRefreshToken: false,
+            detectSessionInUrl: false
+        },
+        global: {
+            headers: { 'x-application-name': 'loker-app' }
+        },
+        db: {
+            schema: 'public'
+        },
+        realtime: {
+            params: {
+                eventsPerSecond: 2 // Batasi event realtime
+            }
+        }
+    }
 );
-
-// Optional: Cek apakah environment variables tersedia
-if (!process.env.SUPABASE_DATABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-    console.warn('⚠️ Supabase environment variables not found. Using fallback for local testing.');
-    // Fallback hanya untuk development lokal
-    const FALLBACK_URL = 'https://phpsktqxrrbxswhyvhwd.supabase.co';
-    const FALLBACK_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBocHNrdHF4cnJieHN3aHl2aHdkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0ODkzOTIsImV4cCI6MjA5MTA2NTM5Mn0.EmHvCpqQokmm9CPDLC2p23vJxT_I929C5jAvGdcmRN0';
-    supabase = window.supabaseJs.createClient(FALLBACK_URL, FALLBACK_KEY);
-}
 
 // ==================== GLOBAL VARIABLES ====================
 const TOTAL_LOKER = 40;
 let currentLoker = 1;
 let lokerData = {};
 let isConnected = false;
+let isLoading = false;
+let loadTimeout = null;
+
+// Cache untuk mengurangi request
+let lastLoadTime = 0;
+const CACHE_DURATION = 30000; // 30 detik cache
 
 // DOM Elements
 const syncStatusEl = document.getElementById('syncStatus');
@@ -30,74 +41,78 @@ const totalDataCount = document.getElementById('totalDataCount');
 
 // ==================== UTILITY FUNCTIONS ====================
 
-// Show toast notification
 function showToast(message, type = 'success') {
     const toast = document.getElementById('toast');
+    if (!toast) return;
     toast.textContent = message;
     toast.className = `toast ${type} show`;
     setTimeout(() => {
         toast.classList.remove('show');
-    }, 3000);
+    }, 2000);
 }
 
-// Update sync status
 function updateSyncStatus(connected, message = '') {
     isConnected = connected;
     if (connected) {
-        syncStatusEl.innerHTML = '<i class="fas fa-check-circle"></i> Terhubung ke cloud • Data tersinkron semua device';
+        syncStatusEl.innerHTML = '<i class="fas fa-check-circle"></i> Cloud sync aktif';
         syncStatusEl.className = 'sync-status success';
     } else {
-        syncStatusEl.innerHTML = `<i class="fas fa-exclamation-triangle"></i> ${message || 'Mode offline • Data tersimpan lokal'}`;
+        syncStatusEl.innerHTML = `<i class="fas fa-exclamation-triangle"></i> ${message || 'Mode offline'}`;
         syncStatusEl.className = 'sync-status error';
     }
 }
 
-// Konversi file ke base64
-function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = error => reject(error);
+// ==================== SUPABASE OPERATIONS (OPTIMIZED) ====================
+
+// Load data dengan timeout dan retry
+async function loadAllDataWithRetry(retryCount = 0) {
+    if (isLoading) return;
+    isLoading = true;
+    
+    // Cek cache dulu
+    const now = Date.now();
+    if (lastLoadTime && (now - lastLoadTime) < CACHE_DURATION && Object.keys(lokerData).length > 0) {
+        console.log('📦 Using cached data');
+        isLoading = false;
+        return;
+    }
+    
+    // Set timeout untuk loading (5 detik)
+    const timeoutPromise = new Promise((_, reject) => {
+        loadTimeout = setTimeout(() => reject(new Error('Timeout')), 5000);
     });
-}
-
-// Backup ke localStorage
-function backupToLocalStorage() {
-    localStorage.setItem('loker_app_data', JSON.stringify(lokerData));
-}
-
-// ==================== SUPABASE OPERATIONS ====================
-
-// Load semua data dari Supabase
-async function loadAllData() {
+    
     try {
-        updateSyncStatus(false, 'Mengambil data dari cloud...');
+        updateSyncStatus(false, 'Mengambil data...');
         
-        const { data, error } = await supabase
+        const fetchPromise = supabase
             .from('lokers')
-            .select('*')
+            .select('loker_id, nama_customer, pin_loker, status, tanggal, petugas, foto_url')
             .order('loker_id', { ascending: true });
+        
+        const { data, error } = await Promise.race([fetchPromise, timeoutPromise]);
+        clearTimeout(loadTimeout);
         
         if (error) throw error;
         
-        // Konversi array ke object
+        // Proses data
         const newData = {};
         let filledCount = 0;
         
-        data.forEach(item => {
-            newData[item.loker_id] = {
-                id: item.loker_id,
-                nama: item.nama_customer || '',
-                pin: item.pin_loker || '',
-                status: item.status || 'belum',
-                tanggal: item.tanggal || '',
-                petugas: item.petugas || '',
-                foto: item.foto_url || '',
-                updated_at: item.updated_at
-            };
-            if (item.nama_customer && item.nama_customer !== '') filledCount++;
-        });
+        if (data && data.length > 0) {
+            data.forEach(item => {
+                newData[item.loker_id] = {
+                    id: item.loker_id,
+                    nama: item.nama_customer || '',
+                    pin: item.pin_loker || '',
+                    status: item.status || 'belum',
+                    tanggal: item.tanggal || '',
+                    petugas: item.petugas || '',
+                    foto: item.foto_url || ''
+                };
+                if (item.nama_customer && item.nama_customer !== '') filledCount++;
+            });
+        }
         
         // Inisialisasi loker kosong
         for (let i = 1; i <= TOTAL_LOKER; i++) {
@@ -115,49 +130,68 @@ async function loadAllData() {
         }
         
         lokerData = newData;
+        lastLoadTime = Date.now();
         updateSyncStatus(true);
         renderNavButtons();
         displayCurrentLoker();
         updateTotalDataCount();
         
-        showToast('✅ Data berhasil disinkronkan dari cloud!', 'success');
-        console.log('Data loaded from Supabase');
+        console.log(`✅ Loaded ${filledCount} lockers in ${Date.now() - now}ms`);
         
     } catch (error) {
-        console.error('Error loading from Supabase:', error);
-        updateSyncStatus(false, 'Gagal konek ke cloud');
-        loadFromLocalStorage();
+        clearTimeout(loadTimeout);
+        console.error('Load error:', error);
+        
+        if (retryCount < 2) {
+            console.log(`Retry ${retryCount + 1}/2...`);
+            setTimeout(() => loadAllDataWithRetry(retryCount + 1), 1000);
+        } else {
+            updateSyncStatus(false, 'Koneksi lambat • Mode offline');
+            loadFromLocalStorage();
+            showToast('⚠️ Koneksi lambat, menggunakan data lokal', 'error');
+        }
+    } finally {
+        isLoading = false;
     }
 }
 
-// Load dari localStorage (fallback)
+// Load dari localStorage (fast fallback)
 function loadFromLocalStorage() {
     const saved = localStorage.getItem('loker_app_data');
     if (saved) {
-        lokerData = JSON.parse(saved);
-        showToast('📀 Menggunakan data lokal (offline mode)', 'info');
-    } else {
-        for (let i = 1; i <= TOTAL_LOKER; i++) {
-            lokerData[i] = {
-                id: i,
-                nama: '',
-                pin: '',
-                status: 'belum',
-                tanggal: '',
-                petugas: '',
-                foto: ''
-            };
+        try {
+            lokerData = JSON.parse(saved);
+            console.log('📀 Using localStorage (fast)');
+        } catch(e) {
+            initEmptyData();
         }
+    } else {
+        initEmptyData();
     }
     renderNavButtons();
     displayCurrentLoker();
     updateTotalDataCount();
 }
 
-// Simpan ke Supabase
+function initEmptyData() {
+    for (let i = 1; i <= TOTAL_LOKER; i++) {
+        lokerData[i] = {
+            id: i,
+            nama: '',
+            pin: '',
+            status: 'belum',
+            tanggal: '',
+            petugas: '',
+            foto: ''
+        };
+    }
+}
+
+// Simpan ke Supabase (optimized - batch update)
 async function saveToSupabase(lokerId, data) {
     try {
-        const { error } = await supabase
+        // Set timeout untuk save
+        const savePromise = supabase
             .from('lokers')
             .upsert({
                 loker_id: lokerId,
@@ -170,32 +204,43 @@ async function saveToSupabase(lokerId, data) {
                 updated_at: new Date().toISOString()
             }, { onConflict: 'loker_id' });
         
-        if (error) throw error;
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Save timeout')), 3000)
+        );
+        
+        await Promise.race([savePromise, timeoutPromise]);
         
         backupToLocalStorage();
         return true;
         
     } catch (error) {
-        console.error('Error saving to Supabase:', error);
-        updateSyncStatus(false, 'Gagal simpan ke cloud');
+        console.error('Save error:', error);
         backupToLocalStorage();
         return false;
     }
 }
 
-// Upload foto ke Supabase Storage
+// Upload foto dengan kompresi
 async function uploadPhoto(file, lokerId) {
     if (!file) return null;
     
+    // Kompres foto sebelum upload
+    const compressedFile = await compressImage(file);
+    
     try {
-        const fileExt = file.name.split('.').pop();
+        const fileExt = compressedFile.name.split('.').pop();
         const fileName = `loker_${lokerId}_${Date.now()}.${fileExt}`;
         const filePath = `foto-loker/${fileName}`;
         
-        const { error: uploadError } = await supabase.storage
+        const uploadPromise = supabase.storage
             .from('loker-bukti')
-            .upload(filePath, file);
+            .upload(filePath, compressedFile);
         
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Upload timeout')), 5000)
+        );
+        
+        const { error: uploadError } = await Promise.race([uploadPromise, timeoutPromise]);
         if (uploadError) throw uploadError;
         
         const { data: { publicUrl } } = supabase.storage
@@ -205,84 +250,111 @@ async function uploadPhoto(file, lokerId) {
         return publicUrl;
         
     } catch (error) {
-        console.error('Upload foto gagal:', error);
+        console.error('Upload error:', error);
         return await fileToBase64(file);
     }
 }
 
-// Hapus data loker dari cloud
-async function deleteLokerData(lokerId) {
-    if (!confirm(`⚠️ Yakin ingin menghapus SEMUA data Loker ${lokerId}?\n\nData akan hilang dari semua device!`)) return false;
-    
-    try {
-        const { error } = await supabase
-            .from('lokers')
-            .delete()
-            .eq('loker_id', lokerId);
-        
-        if (error) throw error;
-        
-        lokerData[lokerId] = {
-            id: lokerId,
-            nama: '',
-            pin: '',
-            status: 'belum',
-            tanggal: '',
-            petugas: '',
-            foto: ''
+// Kompres gambar sebelum upload
+function compressImage(file) {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = (e) => {
+            const img = new Image();
+            img.src = e.target.result;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                let width = img.width;
+                let height = img.height;
+                
+                // Resize jika terlalu besar (max 800px)
+                const maxSize = 800;
+                if (width > maxSize || height > maxSize) {
+                    if (width > height) {
+                        height = (height * maxSize) / width;
+                        width = maxSize;
+                    } else {
+                        width = (width * maxSize) / height;
+                        height = maxSize;
+                    }
+                }
+                
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Kompres ke JPEG dengan quality 70%
+                canvas.toBlob((blob) => {
+                    const compressedFile = new File([blob], file.name, {
+                        type: 'image/jpeg',
+                        lastModified: Date.now()
+                    });
+                    resolve(compressedFile);
+                }, 'image/jpeg', 0.7);
+            };
         };
-        
-        backupToLocalStorage();
-        renderNavButtons();
-        displayCurrentLoker();
-        updateTotalDataCount();
-        
-        showToast(`🗑️ Data Loker ${lokerId} berhasil dihapus dari cloud!`, 'success');
-        return true;
-        
-    } catch (error) {
-        console.error('Error deleting from Supabase:', error);
-        showToast('❌ Gagal menghapus data', 'error');
-        return false;
-    }
+    });
 }
 
-// ==================== RENDER UI ====================
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = error => reject(error);
+    });
+}
+
+function backupToLocalStorage() {
+    localStorage.setItem('loker_app_data', JSON.stringify(lokerData));
+}
+
+// ==================== RENDER UI (Optimized) ====================
 
 function updateTotalDataCount() {
     let count = 0;
     for (let i = 1; i <= TOTAL_LOKER; i++) {
-        if (lokerData[i] && lokerData[i].nama && lokerData[i].nama !== '') {
-            count++;
-        }
+        if (lokerData[i]?.nama && lokerData[i].nama !== '') count++;
     }
-    totalDataCount.textContent = `${count} terisi`;
+    if (totalDataCount) totalDataCount.textContent = `${count} terisi`;
 }
 
 function renderNavButtons() {
-    lokerNavButtons.innerHTML = '';
+    if (!lokerNavButtons) return;
+    
+    // Batch DOM updates
+    const fragment = document.createDocumentFragment();
     
     for (let i = 1; i <= TOTAL_LOKER; i++) {
         const btn = document.createElement('button');
         btn.className = `nav-btn ${currentLoker === i ? 'active' : ''}`;
         
         const data = lokerData[i];
-        if (data && data.nama && data.nama !== '') {
+        if (data?.nama && data.nama !== '') {
             btn.classList.add('has-data');
         }
         
         btn.innerHTML = `<i class="fas fa-door-closed"></i> ${i}`;
-        btn.onclick = () => {
-            currentLoker = i;
-            renderNavButtons();
-            displayCurrentLoker();
-            document.getElementById('lokerNumber').innerText = i;
-            document.getElementById('displayLokerNumber').innerText = i;
-            clearFormOnly();
-        };
+        btn.onclick = (function(lokerId) {
+            return function() {
+                currentLoker = lokerId;
+                renderNavButtons();
+                displayCurrentLoker();
+                const lokerNumberSpan = document.getElementById('lokerNumber');
+                const displayLokerNumberSpan = document.getElementById('displayLokerNumber');
+                if (lokerNumberSpan) lokerNumberSpan.innerText = lokerId;
+                if (displayLokerNumberSpan) displayLokerNumberSpan.innerText = lokerId;
+                clearFormOnly();
+            };
+        })(i);
         
-        lokerNavButtons.appendChild(btn);
+        fragment.appendChild(btn);
     }
+    
+    lokerNavButtons.innerHTML = '';
+    lokerNavButtons.appendChild(fragment);
 }
 
 function displayCurrentLoker() {
@@ -290,64 +362,83 @@ function displayCurrentLoker() {
         nama: '', pin: '', status: 'belum', tanggal: '', petugas: '', foto: ''
     };
     
-    // Update display
-    document.getElementById('displayNama').innerHTML = data.nama ? `<strong>${escapeHtml(data.nama)}</strong>` : '-';
-    document.getElementById('displayPin').innerHTML = data.pin ? `<span class="pin-value">${escapeHtml(data.pin)}</span>` : '-';
-    
-    const statusHtml = data.status === 'sudah' 
-        ? '<span class="status-badge sudah"><i class="fas fa-check"></i> Sudah Diambil</span>'
-        : '<span class="status-badge belum"><i class="fas fa-clock"></i> Belum Diambil</span>';
-    document.getElementById('displayStatus').innerHTML = statusHtml;
-    
-    document.getElementById('displayTanggal').innerHTML = data.tanggal || '-';
-    document.getElementById('displayPetugas').innerHTML = data.petugas ? `<i class="fas fa-user-check"></i> ${escapeHtml(data.petugas)}` : '-';
-    
-    // Foto display
+    // Update display elements with safe checks
+    const displayNama = document.getElementById('displayNama');
+    const displayPin = document.getElementById('displayPin');
+    const displayStatus = document.getElementById('displayStatus');
+    const displayTanggal = document.getElementById('displayTanggal');
+    const displayPetugas = document.getElementById('displayPetugas');
     const fotoDisplay = document.getElementById('fotoDisplay');
-    if (data.foto && data.foto !== '') {
-        fotoDisplay.innerHTML = `<img src="${data.foto}" alt="Bukti Loker ${currentLoker}" onclick="openModal('${data.foto}')">`;
-    } else {
-        fotoDisplay.innerHTML = '<span class="no-foto"><i class="fas fa-camera-slash"></i> Tidak ada foto</span>';
+    const indicator = document.getElementById('lokerStatusIndicator');
+    
+    if (displayNama) displayNama.innerHTML = data.nama ? `<strong>${escapeHtml(data.nama)}</strong>` : '-';
+    if (displayPin) displayPin.innerHTML = data.pin ? `<span class="pin-value">${escapeHtml(data.pin)}</span>` : '-';
+    
+    if (displayStatus) {
+        const statusHtml = data.status === 'sudah' 
+            ? '<span class="status-badge sudah"><i class="fas fa-check"></i> Sudah Diambil</span>'
+            : '<span class="status-badge belum"><i class="fas fa-clock"></i> Belum Diambil</span>';
+        displayStatus.innerHTML = statusHtml;
     }
     
-    // Status indicator
-    const indicator = document.getElementById('lokerStatusIndicator');
-    if (data.nama && data.nama !== '') {
-        indicator.className = 'loker-status-indicator filled';
-        indicator.title = 'Loker terisi';
-    } else {
-        indicator.className = 'loker-status-indicator';
-        indicator.title = 'Loker kosong';
+    if (displayTanggal) displayTanggal.innerHTML = data.tanggal || '-';
+    if (displayPetugas) displayPetugas.innerHTML = data.petugas ? `<i class="fas fa-user-check"></i> ${escapeHtml(data.petugas)}` : '-';
+    
+    if (fotoDisplay) {
+        if (data.foto && data.foto !== '') {
+            fotoDisplay.innerHTML = `<img src="${data.foto}" alt="Bukti Loker ${currentLoker}" onclick="openModal('${data.foto}')" loading="lazy">`;
+        } else {
+            fotoDisplay.innerHTML = '<span class="no-foto"><i class="fas fa-camera-slash"></i> Tidak ada foto</span>';
+        }
+    }
+    
+    if (indicator) {
+        if (data.nama && data.nama !== '') {
+            indicator.className = 'loker-status-indicator filled';
+        } else {
+            indicator.className = 'loker-status-indicator';
+        }
     }
     
     // Isi form
-    document.getElementById('namaCustomer').value = data.nama || '';
-    document.getElementById('pinLoker').value = data.pin || '';
-    document.getElementById('statusPengambilan').value = data.status || 'belum';
-    document.getElementById('tanggal').value = data.tanggal || '';
+    const namaCustomer = document.getElementById('namaCustomer');
+    const pinLoker = document.getElementById('pinLoker');
+    const statusPengambilan = document.getElementById('statusPengambilan');
+    const tanggal = document.getElementById('tanggal');
+    
+    if (namaCustomer) namaCustomer.value = data.nama || '';
+    if (pinLoker) pinLoker.value = data.pin || '';
+    if (statusPengambilan) statusPengambilan.value = data.status || 'belum';
+    if (tanggal) tanggal.value = data.tanggal || '';
     
     // Set petugas
-    const selectedPetugas = document.getElementById('petugasSelect').value;
-    if (selectedPetugas) {
-        document.getElementById('namaPetugas').value = selectedPetugas;
-    } else if (data.petugas) {
-        document.getElementById('namaPetugas').value = data.petugas;
-        const petugasSelect = document.getElementById('petugasSelect');
-        if (petugasSelect.querySelector(`option[value="${data.petugas}"]`)) {
-            petugasSelect.value = data.petugas;
-            document.getElementById('petugasBadge').innerHTML = `<i class="fas fa-user-clock"></i> Petugas: ${data.petugas}`;
+    const selectedPetugas = document.getElementById('petugasSelect');
+    const namaPetugas = document.getElementById('namaPetugas');
+    const petugasBadge = document.getElementById('petugasBadge');
+    
+    if (selectedPetugas && namaPetugas) {
+        if (selectedPetugas.value) {
+            namaPetugas.value = selectedPetugas.value;
+        } else if (data.petugas) {
+            namaPetugas.value = data.petugas;
+            if (selectedPetugas.querySelector(`option[value="${data.petugas}"]`)) {
+                selectedPetugas.value = data.petugas;
+                if (petugasBadge) petugasBadge.innerHTML = `<i class="fas fa-user-clock"></i> Petugas: ${data.petugas}`;
+            }
+        } else {
+            namaPetugas.value = '';
         }
-    } else {
-        document.getElementById('namaPetugas').value = '';
     }
     
     // Preview foto
-    const preview = document.getElementById('fotoPreview');
-    if (data.foto) {
-        preview.src = data.foto;
-        preview.style.display = 'block';
-    } else {
-        preview.style.display = 'none';
+    const fotoPreview = document.getElementById('fotoPreview');
+    if (fotoPreview) {
+        if (data.foto) {
+            fotoPreview.src = data.foto;
+            fotoPreview.style.display = 'block';
+        } else {
+            fotoPreview.style.display = 'none';
+        }
     }
 }
 
@@ -358,20 +449,30 @@ function escapeHtml(text) {
 }
 
 function clearFormOnly() {
-    document.getElementById('namaCustomer').value = '';
-    document.getElementById('pinLoker').value = '';
-    document.getElementById('statusPengambilan').value = 'belum';
-    document.getElementById('fotoBukti').value = '';
-    document.getElementById('fotoPreview').style.display = 'none';
-    document.getElementById('fotoPreview').src = '';
+    const namaCustomer = document.getElementById('namaCustomer');
+    const pinLoker = document.getElementById('pinLoker');
+    const statusPengambilan = document.getElementById('statusPengambilan');
+    const fotoBukti = document.getElementById('fotoBukti');
+    const fotoPreview = document.getElementById('fotoPreview');
+    const tanggal = document.getElementById('tanggal');
+    const petugasSelect = document.getElementById('petugasSelect');
+    const namaPetugas = document.getElementById('namaPetugas');
     
-    const petugas = document.getElementById('petugasSelect').value;
-    if (petugas) {
-        document.getElementById('namaPetugas').value = petugas;
-    } else {
-        document.getElementById('namaPetugas').value = '';
+    if (namaCustomer) namaCustomer.value = '';
+    if (pinLoker) pinLoker.value = '';
+    if (statusPengambilan) statusPengambilan.value = 'belum';
+    if (fotoBukti) fotoBukti.value = '';
+    if (fotoPreview) {
+        fotoPreview.style.display = 'none';
+        fotoPreview.src = '';
     }
-    document.getElementById('tanggal').value = '';
+    if (tanggal) tanggal.value = '';
+    
+    if (petugasSelect && petugasSelect.value && namaPetugas) {
+        namaPetugas.value = petugasSelect.value;
+    } else if (namaPetugas) {
+        namaPetugas.value = '';
+    }
 }
 
 // ==================== SAVE DATA ====================
@@ -379,13 +480,12 @@ function clearFormOnly() {
 async function saveLokerData(event) {
     event.preventDefault();
     
-    const nama = document.getElementById('namaCustomer').value.trim();
-    const pin = document.getElementById('pinLoker').value.trim();
-    const status = document.getElementById('statusPengambilan').value;
-    const petugasInput = document.getElementById('petugasSelect').value;
-    const petugasFinal = petugasInput || document.getElementById('namaPetugas').value;
+    const nama = document.getElementById('namaCustomer')?.value.trim() || '';
+    const pin = document.getElementById('pinLoker')?.value.trim() || '';
+    const status = document.getElementById('statusPengambilan')?.value || 'belum';
+    const petugasInput = document.getElementById('petugasSelect')?.value || '';
+    const petugasFinal = petugasInput || document.getElementById('namaPetugas')?.value || '';
     
-    // Validasi
     if (!nama) {
         showToast('❌ Nama customer harus diisi!', 'error');
         return;
@@ -400,25 +500,24 @@ async function saveLokerData(event) {
     }
     
     const saveBtn = document.querySelector('.btn-save');
-    saveBtn.disabled = true;
-    saveBtn.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Menyimpan...';
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Menyimpan...';
+    }
     
     try {
         const now = new Date();
         const tanggalString = now.toLocaleString('id-ID', { 
             day: '2-digit', month: '2-digit', year: 'numeric', 
-            hour: '2-digit', minute: '2-digit', second: '2-digit' 
+            hour: '2-digit', minute: '2-digit'
         });
         
         let fotoUrl = lokerData[currentLoker]?.foto || '';
         const fileInput = document.getElementById('fotoBukti');
-        if (fileInput.files.length > 0) {
+        if (fileInput?.files?.length > 0) {
             const file = fileInput.files[0];
-            if (isConnected) {
-                fotoUrl = await uploadPhoto(file, currentLoker);
-            } else {
-                fotoUrl = await fileToBase64(file);
-            }
+            showToast('📸 Mengupload foto...', 'info');
+            fotoUrl = await uploadPhoto(file, currentLoker);
         }
         
         lokerData[currentLoker] = {
@@ -440,9 +539,9 @@ async function saveLokerData(event) {
         }
         
         if (saved) {
-            showToast(`✅ Data Loker ${currentLoker} berhasil disimpan! Semua device akan melihat data ini.`, 'success');
+            showToast(`✅ Data Loker ${currentLoker} tersimpan!`, 'success');
         } else {
-            showToast(`⚠️ Data tersimpan LOKAL. Koneksi cloud bermasalah.`, 'error');
+            showToast(`⚠️ Data tersimpan lokal`, 'error');
         }
         
         renderNavButtons();
@@ -452,10 +551,12 @@ async function saveLokerData(event) {
         
     } catch (error) {
         console.error('Save error:', error);
-        showToast('❌ Terjadi kesalahan saat menyimpan data', 'error');
+        showToast('❌ Gagal menyimpan data', 'error');
     } finally {
-        saveBtn.disabled = false;
-        saveBtn.innerHTML = '<i class="fas fa-save"></i> Simpan Data';
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = '<i class="fas fa-save"></i> Simpan Data';
+        }
     }
 }
 
@@ -465,15 +566,48 @@ function clearTotalForm() {
     }
 }
 
+async function deleteLokerData(lokerId) {
+    try {
+        if (isConnected) {
+            await supabase.from('lokers').delete().eq('loker_id', lokerId);
+        }
+        
+        lokerData[lokerId] = {
+            id: lokerId,
+            nama: '',
+            pin: '',
+            status: 'belum',
+            tanggal: '',
+            petugas: '',
+            foto: ''
+        };
+        
+        backupToLocalStorage();
+        renderNavButtons();
+        displayCurrentLoker();
+        updateTotalDataCount();
+        showToast(`🗑️ Data Loker ${lokerId} dihapus`, 'success');
+        
+    } catch (error) {
+        console.error('Delete error:', error);
+        showToast('❌ Gagal menghapus data', 'error');
+    }
+}
+
 async function refreshAllData() {
     const refreshBtn = document.getElementById('refreshDataBtn');
-    refreshBtn.disabled = true;
-    refreshBtn.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Menyinkronkan...';
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.innerHTML = '<i class="fas fa-spinner fa-pulse"></i>';
+    }
     
-    await loadAllData();
+    lastLoadTime = 0; // Reset cache
+    await loadAllDataWithRetry();
     
-    refreshBtn.disabled = false;
-    refreshBtn.innerHTML = '<i class="fas fa-sync-alt"></i> Sinkronisasi Cloud';
+    if (refreshBtn) {
+        refreshBtn.disabled = false;
+        refreshBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
+    }
 }
 
 // ==================== MODAL ZOOM ====================
@@ -482,43 +616,51 @@ function openModal(imgSrc) {
     const modal = document.getElementById('imageModal');
     const modalImg = document.getElementById('modalImage');
     const modalCaption = document.getElementById('modalCaption');
-    modal.style.display = 'block';
-    modalImg.src = imgSrc;
-    modalCaption.textContent = `Foto Bukti Loker ${currentLoker}`;
+    if (modal && modalImg) {
+        modal.style.display = 'block';
+        modalImg.src = imgSrc;
+        if (modalCaption) modalCaption.textContent = `Foto Bukti Loker ${currentLoker}`;
+    }
 }
 
 // ==================== EVENT LISTENERS ====================
 
-document.getElementById('lokerForm').addEventListener('submit', saveLokerData);
-document.getElementById('clearFormBtn').addEventListener('click', clearTotalForm);
-document.getElementById('refreshDataBtn').addEventListener('click', refreshAllData);
-document.getElementById('deleteLokerBtn').addEventListener('click', () => clearTotalForm());
+document.getElementById('lokerForm')?.addEventListener('submit', saveLokerData);
+document.getElementById('clearFormBtn')?.addEventListener('click', clearTotalForm);
+document.getElementById('refreshDataBtn')?.addEventListener('click', refreshAllData);
+document.getElementById('deleteLokerBtn')?.addEventListener('click', () => clearTotalForm());
 
-document.getElementById('petugasSelect').addEventListener('change', function(e) {
+document.getElementById('petugasSelect')?.addEventListener('change', function(e) {
     const petugas = e.target.value;
-    document.getElementById('namaPetugas').value = petugas;
-    document.getElementById('petugasBadge').innerHTML = petugas 
-        ? `<i class="fas fa-user-clock"></i> Petugas: ${petugas}` 
-        : '<i class="fas fa-user-clock"></i> Belum dipilih';
+    const namaPetugas = document.getElementById('namaPetugas');
+    const petugasBadge = document.getElementById('petugasBadge');
+    if (namaPetugas) namaPetugas.value = petugas;
+    if (petugasBadge) {
+        petugasBadge.innerHTML = petugas 
+            ? `<i class="fas fa-user-clock"></i> Petugas: ${petugas}` 
+            : '<i class="fas fa-user-clock"></i> Belum dipilih';
+    }
 });
 
-document.getElementById('fotoBukti').addEventListener('change', function(e) {
+document.getElementById('fotoBukti')?.addEventListener('change', function(e) {
     const file = e.target.files[0];
     if (file) {
         const reader = new FileReader();
         reader.onload = function(event) {
             const preview = document.getElementById('fotoPreview');
-            preview.src = event.target.result;
-            preview.style.display = 'block';
+            if (preview) {
+                preview.src = event.target.result;
+                preview.style.display = 'block';
+            }
         };
         reader.readAsDataURL(file);
     }
 });
 
 // Modal close
-document.querySelector('.close-modal').onclick = function() {
+document.querySelector('.close-modal')?.addEventListener('click', function() {
     document.getElementById('imageModal').style.display = 'none';
-};
+});
 window.onclick = function(event) {
     const modal = document.getElementById('imageModal');
     if (event.target === modal) {
@@ -529,8 +671,25 @@ window.onclick = function(event) {
 // ==================== INITIALIZATION ====================
 
 async function init() {
-    console.log('🚀 Starting Loker App with Supabase Cloud Sync...');
-    await loadAllData();
+    console.log('🚀 Starting Loker App...');
+    
+    // Tampilkan loading indicator
+    if (syncStatusEl) {
+        syncStatusEl.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Menghubungkan...';
+    }
+    
+    // Load data dengan timeout 5 detik
+    const loadPromise = loadAllDataWithRetry();
+    const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => {
+            console.log('⚠️ Load timeout, using localStorage');
+            loadFromLocalStorage();
+            resolve();
+        }, 5000);
+    });
+    
+    await Promise.race([loadPromise, timeoutPromise]);
 }
 
+// Start the app
 init();
