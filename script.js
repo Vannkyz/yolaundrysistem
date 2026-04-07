@@ -9,7 +9,7 @@ const supabase = window.supabaseJs.createClient(
 );
 
 // Optional: Cek apakah environment variables tersedia
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+if (!process.env.SUPABASE_DATABASE_URL || !process.env.SUPABASE_ANON_KEY) {
     console.warn('⚠️ Supabase environment variables not found. Using fallback for local testing.');
     // Fallback hanya untuk development lokal
     const FALLBACK_URL = 'https://phpsktqxrrbxswhyvhwd.supabase.co';
