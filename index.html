@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>Manajemen Loker 40 - Cloud Sync</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Supabase JS SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header dengan Status Cloud -->
+        <header class="header">
+            <div class="header-content">
+                <h1><i class="fas fa-cloud-upload-alt"></i> Sistem Manajemen Loker</h1>
+                <p>40 Loker Digital | Real-Time Sync Semua Device</p>
+                <div class="sync-status" id="syncStatus">
+                    <i class="fas fa-spinner fa-pulse"></i> Menghubungkan ke cloud...
+                </div>
+            </div>
+        </header>
+
+        <!-- Petugas Selector Bar -->
+        <div class="petugas-section">
+            <div class="petugas-wrapper">
+                <label><i class="fas fa-user-tie"></i> Petugas Bertugas:</label>
+                <select id="petugasSelect" class="petugas-select">
+                    <option value="">-- Pilih Petugas --</option>
+                    <option value="Iwan">👤 Iwan</option>
+                    <option value="Sigit">👤 Sigit</option>
+                    <option value="Broery">👤 Broery</option>
+                    <option value="Jean">👤 Jean</option>
+                </select>
+                <span class="petugas-badge" id="petugasBadge">
+                    <i class="fas fa-user-clock"></i> Belum dipilih
+                </span>
+            </div>
+            <button id="refreshDataBtn" class="btn-sync">
+                <i class="fas fa-sync-alt"></i> Sinkronisasi Cloud
+            </button>
+        </div>
+
+        <!-- Navigation Loker -->
+        <nav class="loker-nav">
+            <div class="nav-header">
+                <i class="fas fa-door-open"></i> Daftar Loker
+                <span class="total-data" id="totalDataCount">0 terisi</span>
+            </div>
+            <div class="nav-buttons" id="lokerNavButtons">
+                <!-- Tombol Loker 1-40 akan di-generate oleh JS -->
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Form Section -->
+            <div class="form-card">
+                <div class="form-header">
+                    <div class="form-title">
+                        <i class="fas fa-edit"></i>
+                        <h2>Form Loker #<span id="lokerNumber">1</span></h2>
+                    </div>
+                    <div class="loker-status-indicator" id="lokerStatusIndicator"></div>
+                </div>
+                
+                <form id="lokerForm">
+                    <div class="form-group">
+                        <label><i class="fas fa-user"></i> Nama Customer <span class="required">*</span></label>
+                        <input type="text" id="namaCustomer" placeholder="Masukkan nama lengkap customer" autocomplete="off">
+                    </div>
+
+                    <div class="form-group">
+                        <label><i class="fas fa-key"></i> PIN Loker (Minimal 4 digit angka) <span class="required">*</span></label>
+                        <input type="text" id="pinLoker" placeholder="Contoh: 1234" maxlength="6" pattern="\d*" inputmode="numeric" class="pin-input">
+                        <small class="input-hint"><i class="fas fa-info-circle"></i> PIN ditampilkan langsung untuk keamanan internal</small>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label><i class="fas fa-check-circle"></i> Status Pengambilan</label>
+                            <select id="statusPengambilan" class="status-select">
+                                <option value="belum">⏳ Belum Diambil</option>
+                                <option value="sudah">✅ Sudah Diambil</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label><i class="fas fa-calendar-alt"></i> Tanggal Transaksi</label>
+                            <input type="text" id="tanggal" readonly placeholder="Otomatis saat save" class="date-input">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label><i class="fas fa-id-badge"></i> Nama Petugas</label>
+                        <input type="text" id="namaPetugas" readonly placeholder="Pilih dari dropdown di atas" class="petugas-input">
+                    </div>
+
+                    <div class="form-group">
+                        <label><i class="fas fa-camera"></i> Foto Bukti Isi Loker</label>
+                        <div class="file-upload-wrapper">
+                            <input type="file" id="fotoBukti" accept="image/*" capture="environment">
+                            <label for="fotoBukti" class="file-upload-label">
+                                <i class="fas fa-upload"></i> Pilih Foto
+                            </label>
+                        </div>
+                        <div class="preview-container" id="previewContainer">
+                            <img id="fotoPreview" alt="Preview foto" style="display: none;">
+                        </div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn-save">
+                            <i class="fas fa-save"></i> Simpan Data
+                        </button>
+                        <button type="button" id="clearFormBtn" class="btn-clear">
+                            <i class="fas fa-trash-alt"></i> Bersihkan Form Total
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Data Display Section -->
+            <div class="data-card">
+                <div class="data-header">
+                    <div class="data-title">
+                        <i class="fas fa-database"></i>
+                        <h2>Data Loker #<span id="displayLokerNumber">1</span></h2>
+                    </div>
+                    <button id="deleteLokerBtn" class="btn-delete-data" title="Hapus semua data loker ini">
+                        <i class="fas fa-trash-alt"></i> Hapus Data
+                    </button>
+                </div>
+                
+                <div class="data-content" id="dataContent">
+                    <div class="info-card">
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-user"></i>
+                                <span>Nama Customer</span>
+                            </div>
+                            <div class="info-value" id="displayNama">-</div>
+                        </div>
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-key"></i>
+                                <span>PIN Loker</span>
+                            </div>
+                            <div class="info-value pin-value" id="displayPin">-</div>
+                        </div>
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-check-circle"></i>
+                                <span>Status</span>
+                            </div>
+                            <div class="info-value" id="displayStatus">-</div>
+                        </div>
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-calendar-alt"></i>
+                                <span>Tanggal</span>
+                            </div>
+                            <div class="info-value" id="displayTanggal">-</div>
+                        </div>
+                        <div class="info-row">
+                            <div class="info-label">
+                                <i class="fas fa-id-badge"></i>
+                                <span>Petugas</span>
+                            </div>
+                            <div class="info-value" id="displayPetugas">-</div>
+                        </div>
+                        <div class="info-row foto-info-row">
+                            <div class="info-label">
+                                <i class="fas fa-image"></i>
+                                <span>Foto Bukti</span>
+                            </div>
+                            <div class="foto-display" id="fotoDisplay">
+                                <span class="no-foto">
+                                    <i class="fas fa-camera-slash"></i> Tidak ada foto
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal Zoom Foto -->
+        <div id="imageModal" class="modal">
+            <div class="modal-content-wrapper">
+                <span class="close-modal">&times;</span>
+                <img class="modal-image" id="modalImage">
+                <div id="modalCaption" class="modal-caption"></div>
+            </div>
+        </div>
+
+        <!-- Toast Notification -->
+        <div id="toast" class="toast"></div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
